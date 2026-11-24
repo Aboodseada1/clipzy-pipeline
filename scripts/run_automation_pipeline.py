@@ -12,14 +12,14 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # Directories
-PROJECT_DIR = "/var/www/clipzy.aaseada.com"
+PROJECT_DIR = os.environ.get("CLIPZY_PROJECT_DIR", os.getcwd())
 STORAGE_DIR = os.path.join(PROJECT_DIR, "public", "storage", "renders")
 TMP_DIR = "/tmp/clipzy_downloads"
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(TMP_DIR, exist_ok=True)
 
 # Database connection
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://lobster:26843545@127.0.0.1:5434/clipzy?schema=public")
+DB_URL = os.environ["DATABASE_URL"]
 
 def get_db():
     clean_url = DB_URL.split("?")[0]
