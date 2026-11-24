@@ -10,8 +10,8 @@ import { Loader2 } from "lucide-react";
 
 export default function LoginClient() {
   const router = useRouter();
-  const [email, setEmail] = useState("ops@clipzy.aaseada.com");
-  const [password, setPassword] = useState("clipzy-launch-2026");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
