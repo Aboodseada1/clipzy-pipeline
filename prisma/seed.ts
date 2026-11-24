@@ -4,8 +4,9 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 
 async function main() {
-  const email = process.env.SEED_OPERATOR_EMAIL || "ops@clipzy.aaseada.com";
-  const password = process.env.SEED_OPERATOR_PASSWORD || "clipzy-launch-2026";
+  const email = process.env.SEED_OPERATOR_EMAIL || "ops@example.com";
+  const password = process.env.SEED_OPERATOR_PASSWORD;
+  if (!password) throw new Error("Set SEED_OPERATOR_PASSWORD before seeding.");
   const passwordHash = await bcrypt.hash(password, 12);
 
   const owner = await prisma.user.upsert({
@@ -14,14 +15,14 @@ async function main() {
     create: { email, name: "Pipeline Operator", passwordHash, role: Role.OWNER, status: "active" },
   });
 
-  const friendEmail = "friend@clipzy.aaseada.com";
+  const friendEmail = "collaborator@example.com";
   const friend = await prisma.user.upsert({
     where: { email: friendEmail },
     update: {},
     create: {
       email: friendEmail,
       name: "Collaborator",
-      passwordHash: await bcrypt.hash("clipzy-launch-2026", 12),
+      passwordHash: passwordHash,
       role: Role.OPERATOR,
       status: "active",
     },
