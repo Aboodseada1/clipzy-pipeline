@@ -22,28 +22,15 @@ npm run db:seed           # seed operator + demo data
 npm run dev               # http://localhost:3200
 ```
 
-The seed creates two operator accounts:
-
-- `ops@clipzy.aaseada.com` (OWNER)
-- `friend@clipzy.aaseada.com` (OPERATOR)
-
-Password for both: `clipzy-launch-2026` (override via `SEED_OPERATOR_PASSWORD`).
+Set `SEED_OPERATOR_EMAIL` and `SEED_OPERATOR_PASSWORD` in `.env` before seeding.
+The seed creates an OWNER account and a collaborator (OPERATOR) account that use
+that password. There are no default credentials.
 
 ## Database
 
-This app expects PostgreSQL on `db.scorpion.codes` (per the operator spec).
-Locally the cluster may need starting:
-
-```bash
-pg_ctlcluster 16 main start
-sudo -u postgres createuser lobster -s
-sudo -u postgres psql -c "ALTER USER lobster WITH PASSWORD '26843545';"
-sudo -u postgres createdb clipzy -O lobster
-npm run db:push
-```
-
-`DATABASE_URL` in `.env` should point at the reachable host/port for your
-environment.
+PostgreSQL 14+ is required. Create a database and point `DATABASE_URL` in `.env`
+at it (for example `postgresql://USER:PASSWORD@localhost:5432/clipzy?schema=public`).
+Then run `npm run db:push`.
 
 ## Pipeline architecture
 
@@ -85,5 +72,5 @@ npm run build
 pm2 start ecosystem.config.js
 ```
 
-Nginx should reverse-proxy `clipzy.aaseada.com` to `127.0.0.1:3200`, with the
+Nginx should reverse-proxy your domain to `127.0.0.1:3200`, with the
 SSE endpoint (`/api/stream`) configured with `proxy_buffering off`.
