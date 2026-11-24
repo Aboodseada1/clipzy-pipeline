@@ -1,0 +1,414 @@
+// Clipzy — Autonomous short-form content pipeline control plane.
+// Prisma schema. All timestamps UTC. All workflow entities emit immutable events.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth, users, RBAC, audit
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  OWNER
+  OPERATOR
+  VIEWER
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  passwordHash  String
+  role          Role     @default(OPERATOR)
+  status        String   @default("active") // active | disabled | invited
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  sessions      Session[]
+  auditLogs     AuditLog[]
+  approvals     ApprovalTask[]
+  comments      ClipComment[]
+  operatorEvents PipelineEvent[]
+
+  @@map("users")
+}
+
+model Session {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  sessionToken   String   @unique @map("session_token")
+  userAgent      String?  @map("user_agent")
+  ip             String?
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  revokedAt      DateTime? @map("revoked_at")
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  userId    String?  @map("user_id")
+  action    String   // e.g. "approval.approve", "config.update", "auth.login"
+  category  String   // auth | approval | config | publish | system | manual_override
+  targetType String? @map("target_type")
+  targetId  String?  @map("target_id")
+  detail    Json?
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([targetType, targetId])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sources, rights, assets
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SourceKind {
+  STREAMER
+  CHANNEL
+  TREND_FEED
+  MANUAL
+}
+
+enum RightsStatus {
+  CLEARED
+  PENDING_REVIEW
+  UNKNOWN
+  DENIED
+}
+
+model Source {
+  id              String      @id @default(cuid())
+  label           String
+  kind            SourceKind  @default(STREAMER)
+  platform        String      // twitch | youtube | kick | manual | trend_discovery
+  externalId      String?     @map("external_id")
+  watchlist       Boolean     @default(true)
+  rightsStatus    RightsStatus @default(UNKNOWN) @map("rights_status")
+  attributionText String?     @map("attribution_text")
+  requiresReview  Boolean     @default(true) @map("requires_review")
+  metadata        Json?
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  assets          SourceAsset[]
+  events          PipelineEvent[]
+
+  @@index([platform, externalId])
+  @@map("sources")
+}
+
+model SourceAsset {
+  id              String       @id @default(cuid())
+  sourceId        String       @map("source_id")
+  externalId      String?      @map("external_id")
+  title           String?
+  kind            String       // live | vod | clip_candidate | trend
+  url             String?
+  durationSec     Int?         @map("duration_sec")
+  isLive          Boolean      @default(false) @map("is_live")
+  detectedAt      DateTime     @default(now()) @map("detected_at")
+  rightsStatus    RightsStatus @default(UNKNOWN) @map("rights_status")
+  engagement      Json?        // {viewers, likes, comments, velocity}
+  metadata        Json?
+  createdAt       DateTime     @default(now()) @map("created_at")
+
+  source          Source       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  candidates      ClipCandidate[]
+
+  @@index([sourceId])
+  @@index([rightsStatus])
+  @@map("source_assets")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clips through the pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ClipStage {
+  DETECTED          // candidate produced
+  SELECTED          // ranked & selected for production
+  RENDERING         // extraction/reframe/caption in progress
+  RENDERED          // produced artifact ready
+  COMPLIANCE        // in compliance gate
+  COMPLIANCE_FLAG   // blocked/flagged for review
+  APPROVAL          // awaiting human approval
+  APPROVED          // human approved
+  REJECTED          // human rejected
+  SCHEDULED         // queued for publishing
+  PUBLISHING        // dispatch in progress
+  PUBLISHED         // posted to platform(s)
+  FAILED            // terminal failure
+  HELD              // operator paused this clip
+}
+
+enum ClipStatus {
+  ACTIVE
+  COMPLETED
+  FAILED
+  HELD
+  ARCHIVED
+}
+
+model ClipCandidate {
+  id              String    @id @default(cuid())
+  sourceAssetId   String    @map("source_asset_id")
+  externalRef     String?   @map("external_ref")
+  title           String?
+  summary         String?   @db.Text
+  startSec        Float     @map("start_sec")
+  endSec          Float     @map("end_sec")
+  durationSec     Float     @map("duration_sec")
+  // Virality scoring (Stage 2)
+  hookScore       Float     @default(0) @map("hook_score")
+  narrativeScore  Float     @default(0) @map("narrative_score")
+  emotionScore    Float     @default(0) @map("emotion_score")
+  quotabilityScore Float    @default(0) @map("quotability_score")
+  noveltyScore    Float     @default(0) @map("novelty_score")
+  viralityScore   Float     @default(0) @map("virality_score") // composite
+  rationale       Json?     // human+model rationale for selection
+  stage           ClipStage @default(DETECTED)
+  status          ClipStatus @default(ACTIVE)
+  priority        Int       @default(50)
+  attemptCount    Int       @default(0) @map("attempt_count")
+  lastError       String?   @map("last_error") @db.Text
+  idempotencyKey  String    @unique @map("idempotency_key")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  sourceAsset     SourceAsset @relation(fields: [sourceAssetId], references: [id], onDelete: Cascade)
+  rendered        RenderedClip?
+  captions        CaptionTrack[]
+  compliance      ComplianceReview?
+  approval        ApprovalTask?
+  publishTasks    PublishTask[]
+  comments        ClipComment[]
+  events          PipelineEvent[]
+
+  @@index([sourceAssetId])
+  @@index([stage])
+  @@index([status])
+  @@index([viralityScore])
+  @@map("clip_candidates")
+}
+
+model RenderedClip {
+  id              String   @id @default(cuid())
+  clipId          String   @unique @map("clip_id")
+  filePath        String?  @map("file_path")
+  previewUrl      String?  @map("preview_url")
+  durationSec     Float?   @map("duration_sec")
+  width           Int?
+  height          Int?
+  aspectRatio     String?  @map("aspect_ratio") // target: 9:16
+  renderVersion   Int      @default(1) @map("render_version")
+  renderDetails   Json?    @map("render_details")
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  clip            ClipCandidate @relation(fields: [clipId], references: [id], onDelete: Cascade)
+
+  @@map("rendered_clips")
+}
+
+model CaptionTrack {
+  id          String   @id @default(cuid())
+  clipId      String   @map("clip_id")
+  kind        String   @default("onscreen") // onscreen | post_copy | hashtags
+  platform    String?  // youtube | tiktok | instagram | universal
+  language    String   @default("en")
+  content     String   @db.Text
+  cues        Json?    // [{t0,t1,text,emphasis}] for word/phrase timing
+  confidence  Float?   @default(1)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  clip        ClipCandidate @relation(fields: [clipId], references: [id], onDelete: Cascade)
+
+  @@index([clipId, kind])
+  @@map("caption_tracks")
+}
+
+model ComplianceReview {
+  id              String   @id @default(cuid())
+  clipId          String   @unique @map("clip_id")
+  status          String   @default("pending") // pass | flag | fail | pending
+  avSyncOk        Boolean? @map("av_sync_ok")
+  captionAccuracy Float?   @map("caption_accuracy")
+  aspectOk        Boolean? @map("aspect_ok")
+  policyFlags     String[] @default([])
+  notes           String?  @db.Text
+  reviewedAt      DateTime? @map("reviewed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  clip            ClipCandidate @relation(fields: [clipId], references: [id], onDelete: Cascade)
+
+  @@map("compliance_reviews")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approval + publishing
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+  HELD
+  ESCALATED
+}
+
+model ApprovalTask {
+  id          String           @id @default(cuid())
+  clipId      String           @unique @map("clip_id")
+  decision    ApprovalDecision @default(PENDING)
+  decisionBy  String?          @map("decision_by")
+  reason      String?          @db.Text
+  createdAt   DateTime         @default(now()) @map("created_at")
+  decidedAt   DateTime?        @map("decided_at")
+
+  clip        ClipCandidate    @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  decider     User?            @relation(fields: [decisionBy], references: [id], onDelete: SetNull)
+
+  @@index([decision])
+  @@map("approval_tasks")
+}
+
+model ClipComment {
+  id        String   @id @default(cuid())
+  clipId    String   @map("clip_id")
+  userId    String   @map("user_id")
+  body      String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  clip      ClipCandidate @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([clipId])
+  @@map("clip_comments")
+}
+
+model PublishTask {
+  id           String     @id @default(cuid())
+  clipId       String     @map("clip_id")
+  platform     String     // youtube | tiktok | instagram | x
+  status       String     @default("queued") // queued | scheduled | publishing | published | failed | cancelled
+  scheduledFor DateTime?  @map("scheduled_for")
+  postUrl      String?    @map("post_url")
+  postCopy     String?    @map("post_copy") @db.Text
+  hashtags     String[]   @default([])
+  attemptCount Int        @default(0) @map("attempt_count")
+  lastError    String?    @map("last_error") @db.Text
+  publishedAt  DateTime?  @map("published_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  clip         ClipCandidate @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  publishedPost PublishedPost?
+
+  @@index([clipId])
+  @@index([status])
+  @@index([platform])
+  @@index([scheduledFor])
+  @@map("publish_tasks")
+}
+
+model PublishedPost {
+  id           String    @id @default(cuid())
+  publishTaskId String   @unique @map("publish_task_id")
+  platform     String
+  postUrl      String    @map("post_url")
+  metricsLast  Json?     @map("metrics_last") @db.Json
+  metricsHist  Json?     @map("metrics_hist") @db.Json  // array of snapshots
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  publishTask  PublishTask @relation(fields: [publishTaskId], references: [id], onDelete: Cascade)
+
+  @@index([platform])
+  @@map("published_posts")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Events, observability, runtime config, system flags
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PipelineEvent {
+  id          BigInt   @id @default(autoincrement())
+  clipId      String?  @map("clip_id")
+  sourceId    String?  @map("source_id")
+  userId      String?  @map("user_id")
+  stage       String?
+  level       String   @default("info") // info | warn | error | debug
+  eventType   String   @map("event_type") // stage.transition | approval.decided | publish.attempt | etc
+  message     String   @db.Text
+  payload     Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  clip        ClipCandidate? @relation(fields: [clipId], references: [id], onDelete: Cascade)
+  source      Source?        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  user        User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([clipId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@index([level])
+  @@map("pipeline_events")
+}
+
+model RuntimeConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  schema    Json?    // optional JSON-schema describing expected shape
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("runtime_configs")
+}
+
+model SystemFlag {
+  id    String @id @default(cuid())
+  key   String @unique
+  value Boolean @default(false)
+  note  String?
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_flags")
+}
+
+model TriggerRun {
+  id              String    @id @default(cuid())
+  triggeredBy     String    @default("manual") // manual | schedule | api
+  status          String    @default("running") // running | completed | failed
+  trendTopic      String?   @map("trend_topic")
+  sourceVideoUrl  String?   @map("source_video_url")
+  sourceVideoTitle String?  @map("source_video_title")
+  outputClipId    String?   @map("output_clip_id")
+  logs            Json?     // [{step, message, ts, level}]
+  error           String?   @db.Text
+  createdAt       DateTime  @default(now()) @map("created_at")
+  completedAt     DateTime? @map("completed_at")
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("trigger_runs")
+}
+
